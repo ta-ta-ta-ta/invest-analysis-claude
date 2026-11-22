@@ -95,6 +95,13 @@ YouTube動画のURLから **動画ID（`v=` の後の文字列）** を確認し
 uv run main.py rxFjizFYh8g
 ```
 
+動画IDの代わりにURLをそのまま渡すこともできます（`watch?v=`・`youtu.be/`・`shorts/`・`live/`・`embed/` 形式に対応）。
+
+```powershell
+uv run main.py "https://www.youtube.com/watch?v=rxFjizFYh8g&t=120s"
+uv run main.py "https://youtu.be/rxFjizFYh8g"
+```
+
 ---
 
 ## 5. 出力結果の確認
