@@ -4,5 +4,6 @@
   {"name": "SHO1112", "handle": "@SHO1112"},
   {"name": "NikkeiCNBC", "handle": "@NikkeiCNBC"},
   {"name": "マーケットマスターズ", "handle": "@マーケットマスターズ-v1r"},
-  {"name": "stockvoice", "handle": "@stockvoice"}
+  {"name": "stockvoice", "handle": "@stockvoice"},
+  {"name": "tvtokyobiz", "handle": "@tvtokyobiz"}
 ]

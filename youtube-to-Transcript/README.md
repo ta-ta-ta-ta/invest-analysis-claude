@@ -133,7 +133,7 @@ uv run main.py "https://youtu.be/rxFjizFYh8g"
 `channels.json` に登録したチャンネルの新着動画を見つけ、文字起こしを `yt-transcripts` ブランチの `transcripts/<チャンネル>/<公開日>_<動画ID>.md` に保存する。
 
 - 字幕の取得は **自分のPCで行う**。クラウド(Claude Code のクラウドセッション等)から字幕を取ろうとすると、YouTube がクラウド事業者のIPを拒否するため失敗する(新着の検知はクラウドでもできる)。
-- 要約は、PCで push された後にクラウドの定期タスク(毎日 18:40 / 20:40)が各ファイル冒頭に `## 要約` として追記する。
+- 要約は、PCで push された後にクラウドの定期タスク(毎日 18:10 / 20:10)が各ファイル冒頭に `## 要約` として追記する。
 
 ### 手動で試す
 
@@ -143,7 +143,17 @@ uv run watch_channels.py --dry-run   # 対象の新着を表示するだけ
 powershell -ExecutionPolicy Bypass -File .\run_watch.ps1   # 取得して yt-transcripts へ push
 ```
 
-`--since-days N`(既定3)より前に公開された動画は対象外。取得済みかどうかはファイルの有無で判断し、字幕がまだ無い動画(配信直後など)は次回再試行する。
+対象は **チャンネルごとに、公開から24時間以内の最新1本だけ**。同じチャンネルが続けて投稿した場合、古いほうは取得しない。`--since-hours N` で期間を、`--all` で「期間内をすべて取得」に変えられる(`--since-days N` も可)。取得済みかどうかはファイルの有無で判断し、最新の動画に字幕がまだ無い場合(配信直後など)は次回再試行する(古い動画には戻らない)。
+
+### 要約のまとめ
+
+同じルール(チャンネルごとに最新1本・24時間以内)で、各ファイルの `## 要約` を1つの Markdown にまとめる。
+
+```powershell
+python youtube-to-Transcript\latest_summaries.py --root .yt-transcripts\transcripts --out latest.md
+```
+
+`--since-hours N` で期間を、`--all` で「最新1本に絞らない」に変えられる。要約がまだ無い動画は「(要約なし)」と出る。
 
 ### タスクスケジューラに登録(18:00 と 20:00)
 
