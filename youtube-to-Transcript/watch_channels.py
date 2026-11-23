@@ -112,6 +112,8 @@ def main() -> int:
                   help='この日数より前に公開された動画は対象外 (既定: 3)')
   ap.add_argument('--dry-run', action='store_true')
   ap.add_argument('--channels', type=Path, default=CHANNELS_FILE)
+  ap.add_argument('--out', type=Path, default=OUT_ROOT,
+                  help='保存先ルート (既定: <repo>/transcripts)')
   args = ap.parse_args()
 
   channels = json.loads(args.channels.read_text(encoding='utf-8'))
@@ -120,7 +122,7 @@ def main() -> int:
 
   for ch in channels:
     name = ch.get('name') or ch.get('handle') or ch.get('channel_id')
-    out_dir = OUT_ROOT / safe_name(name)
+    out_dir = args.out / safe_name(name)
     try:
       cid = resolve_channel_id(ch)
       videos = latest_videos(cid)
@@ -148,7 +150,7 @@ def main() -> int:
 
   print(f'保存: {len(saved)} 件')
   for p in saved:
-    print(f'  {p.relative_to(REPO)}')
+    print(f'  {p}')
   if pending:
     print(f'字幕未取得(次回再試行): {len(pending)} 件')
     for s in pending:

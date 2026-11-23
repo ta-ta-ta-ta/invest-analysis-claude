@@ -126,3 +126,35 @@ uv run main.py "https://youtu.be/rxFjizFYh8g"
 | `ModuleNotFoundError` | 仮想環境外（グローバルなPython）で実行している | `python main.py` ではなく **`uv run main.py`** で実行してください |
 | `type object ... has no attribute 'get_transcript'` | `youtube-transcript-api` v1.0.0以降の仕様変更 | 本手順書の `main.py`（`YouTubeTranscriptApi().fetch()` を使うコード）に更新してください |
 | `字幕の取得に失敗しました` | 動画に日本語・英語の字幕が提供されていない | 対象動画の設定（自動生成字幕の有無）を確認してください |
+---
+
+## 7. 新着の自動取得(登録チャンネル)
+
+`channels.json` に登録したチャンネルの新着動画を見つけ、文字起こしを `yt-transcripts` ブランチの `transcripts/<チャンネル>/<公開日>_<動画ID>.md` に保存する。
+
+- 字幕の取得は **自分のPCで行う**。クラウド(Claude Code のクラウドセッション等)から字幕を取ろうとすると、YouTube がクラウド事業者のIPを拒否するため失敗する(新着の検知はクラウドでもできる)。
+- 要約は、PCで push された後にクラウドの定期タスク(毎日 18:40 / 20:40)が各ファイル冒頭に `## 要約` として追記する。
+
+### 手動で試す
+
+```powershell
+cd <リポジトリ>\youtube-to-Transcript
+uv run watch_channels.py --dry-run   # 対象の新着を表示するだけ
+powershell -ExecutionPolicy Bypass -File .\run_watch.ps1   # 取得して yt-transcripts へ push
+```
+
+`--since-days N`(既定3)より前に公開された動画は対象外。取得済みかどうかはファイルの有無で判断し、字幕がまだ無い動画(配信直後など)は次回再試行する。
+
+### タスクスケジューラに登録(18:00 と 20:00)
+
+```powershell
+$ps1 = (Resolve-Path .\run_watch.ps1).Path
+schtasks /create /tn "YT Transcripts 1800" /sc daily /st 18:00 /tr "powershell -NoProfile -ExecutionPolicy Bypass -File `"$ps1`""
+schtasks /create /tn "YT Transcripts 2000" /sc daily /st 20:00 /tr "powershell -NoProfile -ExecutionPolicy Bypass -File `"$ps1`""
+```
+
+PCが起動していて、git が GitHub に push できる状態(ログイン済み)である必要がある。実行ログは `run_watch.log`。
+
+### チャンネルの追加・削除
+
+`channels.json` を編集する。`handle`(@xxxx)か `channel_id`(UC...)のどちらかがあればよい。

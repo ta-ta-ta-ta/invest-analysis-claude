@@ -21,3 +21,7 @@
 ## レポート
 
 需給診断などのレポートは `reports/YYYY-MM-DD_<名前>.md` に保存する。同じ日のファイルがすでにあれば上書きせず、`_v2` などを付ける。
+
+## YouTube 文字起こし
+
+登録チャンネル(`youtube-to-Transcript/channels.json`)の文字起こしは `yt-transcripts` ブランチの `transcripts/` にある。字幕取得はクラウドから不可(YouTubeがIPを拒否)なので、ユーザーのPCで `youtube-to-Transcript/run_watch.ps1` が取得し、クラウドの定期タスクは要約の追記だけを行う。手順は `youtube-to-Transcript/README.md` の 7 章。

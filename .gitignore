@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+.yt-transcripts/
+youtube-to-Transcript/run_watch.log
