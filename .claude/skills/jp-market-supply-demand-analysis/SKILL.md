@@ -15,13 +15,13 @@ description: 「日本株 需給診断」。日本株の直近相場を需給・
 1. データ収集(下表)。まず `pip install -q yfinance pandas` のあと `python get_market_info/yf_prices.py diag --md <スクラッチパッド>/diag.md` を実行して価格・テクニカル・クロスマーケットを取る。残りは WebSearch で集め、日経平均のPER・BPSが分かったら `--per-w/--per-i/--bps-w/--bps-i` を付けて再実行し、理論値ラインを出す。取れなかった項目は推測せず「未取得」と書く。
 2. 各セクションの判定を計算する。数値は必ず実際に計算し、頭の中で概算しない。
 3. 8条件チェックリストで点灯数を数える。
-4. 出力テンプレートに沿ってレポートを作り、`reports/YYYY-MM-DD_jp-supply-demand.md` に保存する。TOPIXは `^TOPX` が取れないため 1306.T で代替し、その旨をレポートに書く。
+4. 出力テンプレートに沿ってレポートを作り、`reports/YYYY-MM-DD_jp-supply-demand.md` に保存する(同じ日のファイルがあれば `_v2` などを付ける)。TOPIXは `^TOPX` が取れないため 1306.T で代替し、その旨をレポートに書く。
 
 ## データ収集
 
 | 項目 | 入手先の目安 |
 |---|---|
-| 日経平均・TOPIX・S&P500・ドル円・VIX・SOX の日足とテクニカル | `python get_market_info/yf_prices.py diag` で価格とテクニカルを取得する(PER・BPSが分かれば `--per-w/--per-i/--bps-w/--bps-i` を渡す)。スクリプトがない環境では yfinance(^N225, 1306.T, ^GSPC, JPY=X, ^VIX, ^SOX) |
+| 日経平均・TOPIX・S&P500・ドル円・VIX・SOX の日足とテクニカル | `python get_market_info/yf_prices.py diag` で価格とテクニカルを取得する(PER・BPSが分かれば `--per-w/--per-i/--bps-w/--bps-i` を渡す)。スクリプトがない環境では `python get_market_info/yf_prices.py --preset supply-demand --period 2y --outdir <scratchpad>/data` でCSV取得 |
 | 信用取引残高(売残・買残、金額ベース、週次) | JPX「信用取引残高」二市場合計(東証・名証)。WebSearch/WebFetchで最新週を取得 |
 | 日経レバETF(1570)の信用倍率 | 日本証券金融または証券各社の信用残ページ |
 | 日経平均EPS・PER・PBR | 日本経済新聞社「日経平均プロフィル」 |

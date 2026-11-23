@@ -1,103 +1,167 @@
-"""yfinance で日経平均・TOPIX・個別銘柄の株価を取得する(非公式データ)。
-需給診断(jp-market-supply-demand-analysis)用の一括取得・テクニカル計算モードもある。
+"""yfinance で日経平均・TOPIX・個別銘柄などの株価を取得する(非公式データ)。
 
 準備:  pip install yfinance pandas
 
-■ 単一銘柄モード(従来どおり)
+使い方(従来どおり・1銘柄):
   python yf_prices.py ^N225 2026-10-20 2026-11-20     # 日経平均
-  python yf_prices.py 1306.T 2026-10-20 2026-11-20    # TOPIX(^TOPX は取得不可のため連動ETFで代替)
+  python yf_prices.py 1306.T 2026-10-20 2026-11-20    # TOPIX連動ETF(^TOPXは取得不可のため代替)
   python yf_prices.py 8697.T 2026-10-20 2026-11-20    # 個別銘柄(4桁コード + .T)
   python yf_prices.py ^N225                           # 期間省略: 直近1か月
   python yf_prices.py ^N225 2026-10-20 2026-11-20 out.csv   # CSV保存
 
-■ 複数銘柄の終値一覧
-  python yf_prices.py multi ^N225 ^GSPC JPY=X [--period 1mo] [--csv out.csv]
+複数銘柄・期間指定:
+  python yf_prices.py ^N225 ^GSPC USDJPY=X --period 2y --outdir data/
+  python yf_prices.py ^N225 ^VIX --start 2025-01-01 --end 2026-11-20 --outdir data/
+  python yf_prices.py --preset supply-demand --period 2y --outdir data/   # 需給診断用の一式
 
-■ 需給診断モード(日経平均・TOPIXのテクニカル、NS/NT倍率、ドル建て日経RSI、
-  VIXのMACD、クロスマーケット騰落、PER/PBRライン)
+  --outdir を指定すると銘柄ごとに <outdir>/<ティッカー>.csv を保存し、画面には直近 --tail 行(既定5)だけ表示する。
+  1銘柄で --outdir なしの場合は従来どおり全行を表示する。
+
+需給診断(テクニカル・比率・クロスマーケット・理論値ラインを計算して表示):
   python yf_prices.py diag
-  python yf_prices.py diag --per-w 14.46 --per-i 17.43 --bps-w 33922 --bps-i 24289
-  python yf_prices.py diag --end 2026-11-20 --md report_tables.md
+  python yf_prices.py diag --per-w 14.46 --per-i 17.43 --bps-w 33922 --bps-i 24289 --md out.md
+  python yf_prices.py diag --end 2026-11-20          # 過去日の再現(指定日を含む)
     --per-w / --per-i : 日経平均プロフィルの予想PER(加重 / 指数ベース)。EPS は終値÷PER で逆算
     --bps-w / --bps-i : BPS(加重 / 指数ベース)。PBR2倍ラインを計算
-    --end            : この日までのデータで計算(過去日の再現用。指定日を含む)
-    --md             : 結果を Markdown で保存
+    --md              : 結果を Markdown で保存
+
+Python から使う:
+  from yf_prices import fetch, fetch_many, load_csv
+  df = fetch("^N225", period="2y")
+  data = fetch_many(["^N225", "^GSPC"], period="2y")   # {ticker: DataFrame}
 
 注意: Yahoo!ファイナンスの非公式データ。仕様変更・取得制限・規約上の制約があり得る。
-      閾値(±2σ、PER16倍など)の判定は仮説ベースの目安であり、投資助言ではない。
+      ^TOPX(TOPIX指数)は現在データが返らないため、TOPIXは 1306.T(TOPIX連動ETF)で代替する。
 """
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# 需給診断で使うティッカー(表示名: Yahoo!ティッカー)
-DIAG_TICKERS = {
-    "日経平均": "^N225",
-    "TOPIX(1306)": "1306.T",
-    "日経レバ(1570)": "1570.T",
-    "S&P500": "^GSPC",
-    "NASDAQ総合": "^IXIC",
-    "NYダウ": "^DJI",
-    "SOX": "^SOX",
-    "VIX": "^VIX",
-    "ドル円": "JPY=X",
-    "米10年金利": "^TNX",
-    "米長期債(TLT)": "TLT",
-    "米REIT(VNQ)": "VNQ",
-    "KOSPI": "^KS11",
-    "上海総合": "000001.SS",
-    "DAX": "^GDAXI",
-    "Nifty50": "^NSEI",
-    "金": "GC=F",
-    "銀": "SI=F",
-    "銅": "HG=F",
-    "BTC": "BTC-USD",
+COLS = ["Open", "High", "Low", "Close", "Volume"]
+
+# 需給診断(jp-market-supply-demand-analysis)で使う銘柄一式
+PRESETS: dict[str, list[str]] = {
+    "supply-demand": [
+        "^N225", "1306.T", "^GSPC", "^DJI", "^IXIC", "^SOX", "^VIX", "USDJPY=X",
+        "^TNX", "TLT", "GC=F", "SI=F", "HG=F", "BTC-USD",
+        "000001.SS", "^KS11", "^STOXX50E", "^NSEI", "VNQ", "1570.T", "1343.T",
+    ],
+}
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def fetch(ticker: str, start: str | None = None, end: str | None = None,
+          period: str | None = None) -> pd.DataFrame:
+    """1銘柄の日足を取得する。end は指定日を含む。start も period もなければ直近1か月。"""
+    t = yf.Ticker(ticker)
+    if start:
+        # yfinance の end は含まれないため、指定日を含めるよう1日足す
+        end_incl = (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") if end else None
+        df = t.history(start=start, end=end_incl, auto_adjust=False)
+    else:
+        df = t.history(period=period or "1mo", auto_adjust=False)
+    if df.empty:
+        return df
+    df.index = pd.DatetimeIndex(df.index.tz_localize(None).normalize(), name="Date")
+    return df[[c for c in COLS if c in df.columns]]
+
+
+def fetch_many(tickers: list[str], start: str | None = None, end: str | None = None,
+               period: str | None = None) -> dict[str, pd.DataFrame]:
+    """複数銘柄を取得する。取得できなかった銘柄は stderr に出して結果から除く。"""
+    out: dict[str, pd.DataFrame] = {}
+    for tk in tickers:
+        try:
+            df = fetch(tk, start, end, period)
+        except Exception as e:  # ネットワーク・API 側のエラーは銘柄単位でスキップ
+            print(f"取得エラー: {tk}: {e}", file=sys.stderr)
+            continue
+        if df.empty:
+            print(f"データが取得できませんでした: {tk}", file=sys.stderr)
+            continue
+        out[tk] = df
+    return out
+
+
+def safe_name(ticker: str) -> str:
+    """ファイル名に使えない/紛らわしい文字を置き換える(^N225 -> _N225, USDJPY=X -> USDJPY_X)。"""
+    return re.sub(r"[^\w.\-]", "_", ticker)
+
+
+def load_csv(path: str | Path) -> pd.DataFrame:
+    """save した CSV を DatetimeIndex 付きで読み戻す。"""
+    return pd.read_csv(path, index_col="Date", parse_dates=True, encoding="utf-8-sig")
+
+
+def _for_display(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.round(2).copy()
+    d.index = d.index.strftime("%Y-%m-%d")
+    return d
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="yfinance で株価日足を取得する(非公式データ)",
+        epilog="従来形式 'TICKER [START] [END] [OUT.csv]' もそのまま使える。",
+    )
+    p.add_argument("args", nargs="*", help="ティッカー(複数可)。YYYY-MM-DD は開始/終了日、*.csv は保存先として解釈")
+    p.add_argument("--start", help="開始日 YYYY-MM-DD")
+    p.add_argument("--end", help="終了日 YYYY-MM-DD(この日を含む)")
+    p.add_argument("--period", help="期間(1mo, 6mo, 1y, 2y, 5y, max など)。--start 指定時は無視")
+    p.add_argument("--out", help="CSV 保存先(1銘柄のとき)")
+    p.add_argument("--outdir", help="銘柄ごとに CSV を保存するディレクトリ")
+    p.add_argument("--preset", choices=sorted(PRESETS), help="銘柄一式を追加する")
+    p.add_argument("--tail", type=int, default=5, help="--outdir または複数銘柄時に表示する直近行数")
+    ns = p.parse_args(argv)
+
+    # 従来の位置引数(日付・CSV)を振り分ける
+    tickers, dates = [], []
+    for a in ns.args:
+        if _DATE_RE.match(a):
+            dates.append(a)
+        elif a.lower().endswith(".csv"):
+            ns.out = ns.out or a
+        else:
+            tickers.append(a)
+    if len(dates) > 2:
+        p.error("日付は開始日・終了日の2つまでです")
+    if dates:
+        ns.start = ns.start or dates[0]
+        if len(dates) > 1:
+            ns.end = ns.end or dates[1]
+    if ns.preset:
+        tickers += [t for t in PRESETS[ns.preset] if t not in tickers]
+    if not tickers:
+        p.error("ティッカーを1つ以上指定してください")
+    if ns.end and not ns.start:
+        p.error("--end を使うときは開始日も指定してください")
+    if ns.out and len(tickers) > 1:
+        p.error("複数銘柄の保存には --outdir を使ってください")
+    ns.tickers = tickers
+    return ns
+
+
+
+# ---------------------------------------------------------------- 需給診断(diag)
+# 表示名: ティッカー。PRESETS["supply-demand"] と同じ銘柄
+DIAG_NAMES: dict[str, str] = {
+    "日経平均": "^N225", "TOPIX(1306)": "1306.T", "日経レバ(1570)": "1570.T",
+    "S&P500": "^GSPC", "NASDAQ総合": "^IXIC", "NYダウ": "^DJI", "SOX": "^SOX", "VIX": "^VIX",
+    "ドル円": "USDJPY=X", "米10年金利": "^TNX", "米長期債(TLT)": "TLT", "米REIT(VNQ)": "VNQ",
+    "東証REIT(1343)": "1343.T", "KOSPI": "^KS11", "上海総合": "000001.SS",
+    "ユーロストックス50": "^STOXX50E", "Nifty50": "^NSEI",
+    "金": "GC=F", "銀": "SI=F", "銅": "HG=F", "BTC": "BTC-USD",
 }
 
 
-# ---------------------------------------------------------------- 取得
-def fetch(ticker: str, start: str | None = None, end: str | None = None,
-          period: str | None = None) -> pd.DataFrame:
-    """日足 OHLCV を取得。index は tz なしの日付(Timestamp)。取得失敗時は空 DataFrame。"""
-    try:
-        if start:
-            # yfinance の end は含まれないため、指定日を含めるよう1日足す
-            end_incl = (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") if end else None
-            df = yf.Ticker(ticker).history(start=start, end=end_incl, auto_adjust=False)
-        else:
-            df = yf.Ticker(ticker).history(period=period or "1mo", auto_adjust=False)
-    except Exception as e:  # ネットワーク・ティッカー不正など
-        print(f"[warn] {ticker}: {e}", file=sys.stderr)
-        return pd.DataFrame()
-    if df.empty or not isinstance(df.index, pd.DatetimeIndex):
-        return pd.DataFrame()
-    df.index = df.index.tz_localize(None).normalize()
-    df.index.name = "Date"
-    return df
-
-
-def fetch_closes(tickers: dict[str, str], period: str = "2y",
-                 end: str | None = None) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-    """複数銘柄の終値を1つの表に。OHLC も dict で返す。end 指定時はその日までに切る。"""
-    closes, ohlc = {}, {}
-    for name, t in tickers.items():
-        df = fetch(t, period=period)
-        if df.empty:
-            print(f"[warn] 取得できませんでした: {name} ({t})", file=sys.stderr)
-            continue
-        if end:
-            df = df.loc[: pd.Timestamp(end)]
-        closes[name] = df["Close"]
-        ohlc[name] = df
-    return pd.DataFrame(closes), ohlc
-
-
-# ---------------------------------------------------------------- 指標
 def macd(s: pd.Series, fast=12, slow=26, sig=9) -> tuple[pd.Series, pd.Series]:
     m = s.ewm(span=fast, adjust=False).mean() - s.ewm(span=slow, adjust=False).mean()
     return m, m.ewm(span=sig, adjust=False).mean()
@@ -111,7 +175,7 @@ def rsi(s: pd.Series, p: int = 14) -> pd.Series:
 
 
 def parabolic_sar(high: pd.Series, low: pd.Series, af0=0.02, af_max=0.2) -> pd.DataFrame:
-    """Wilder のパラボリック SAR。戻り値: SAR 値と上昇トレンドかどうか。"""
+    """Wilder のパラボリック SAR。SAR 値と上昇トレンドかどうかを返す。"""
     h, lo = high.values, low.values
     n = len(h)
     sar, up_arr = np.zeros(n), np.ones(n, dtype=bool)
@@ -135,9 +199,9 @@ def parabolic_sar(high: pd.Series, low: pd.Series, af0=0.02, af_max=0.2) -> pd.D
     return pd.DataFrame({"SAR": sar, "SAR上昇": up_arr}, index=high.index)
 
 
-def technicals(close: pd.Series, ohlc: pd.DataFrame | None = None) -> pd.DataFrame:
-    """ボリンジャー(25日±2σ)、移動平均、MACD、RSI、σ位置、パラボリック。"""
-    s = close.dropna()
+def technicals(ohlc: pd.DataFrame, with_sar: bool = False) -> pd.DataFrame:
+    """ボリンジャー(25日±2σ)、移動平均、MACD、RSI、σ位置、(任意で)パラボリック。"""
+    s = ohlc["Close"].dropna()
     ma25 = s.rolling(25).mean()
     sd = s.rolling(25).std(ddof=0)
     df = pd.DataFrame({"終値": s, "MA25": ma25, "+2σ": ma25 + 2 * sd, "-2σ": ma25 - 2 * sd})
@@ -146,7 +210,7 @@ def technicals(close: pd.Series, ohlc: pd.DataFrame | None = None) -> pd.DataFra
     df["MACD"], df["シグナル"] = macd(s)
     df["RSI14"] = rsi(s)
     df["σ位置"] = (s - ma25) / sd
-    if ohlc is not None and {"High", "Low"} <= set(ohlc.columns):
+    if with_sar:
         hl = ohlc.loc[s.index]
         df = df.join(parabolic_sar(hl["High"], hl["Low"]))
     return df
@@ -162,19 +226,15 @@ def last_cross(a: pd.Series, b: pd.Series) -> tuple[pd.Timestamp, str] | None:
     return d.index[-1], ("GC" if d.iloc[-1] > 0 else "DC")
 
 
-def pct(a: float, b: float) -> float:
+def _pct(a: float, b: float) -> float:
     return (a / b - 1) * 100
 
 
-# ---------------------------------------------------------------- 出力
-def fmt_table(df: pd.DataFrame) -> str:
-    """簡易 Markdown 表(tabulate 非依存)。"""
+def _md_table(df: pd.DataFrame) -> str:
     cols = [str(c) for c in df.columns]
-    lines = ["| " + " | ".join([df.index.name or ""] + cols) + " |",
-             "|" + "---|" * (len(cols) + 1)]
+    lines = ["| " + " | ".join([df.index.name or ""] + cols) + " |", "|" + "---|" * (len(cols) + 1)]
     for idx, row in df.iterrows():
-        idx_s = idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx)
-        cells = []
+        cells = [idx.strftime("%Y-%m-%d") if isinstance(idx, pd.Timestamp) else str(idx)]
         for v in row:
             if isinstance(v, (bool, np.bool_)):
                 cells.append("↑" if v else "↓")
@@ -182,35 +242,39 @@ def fmt_table(df: pd.DataFrame) -> str:
                 cells.append("" if np.isnan(v) else f"{v:,.2f}")
             else:
                 cells.append(str(v))
-        lines.append("| " + " | ".join([idx_s] + cells) + " |")
+        lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
-def diag(args: argparse.Namespace) -> str:
-    px, ohlc = fetch_closes(DIAG_TICKERS, period=args.period, end=args.end)
+def diag(ns: argparse.Namespace) -> str:
+    raw = fetch_many(list(DIAG_NAMES.values()), period=ns.period)
+    data = {name: raw[t] for name, t in DIAG_NAMES.items() if t in raw}
+    if ns.end:
+        data = {k: v.loc[: pd.Timestamp(ns.end)] for k, v in data.items()}
+    if "日経平均" not in data:
+        sys.exit("日経平均が取得できませんでした(ネットワークを確認)")
+    px = pd.DataFrame({k: v["Close"] for k, v in data.items()})
+    n225 = px["日経平均"].dropna()
     out: list[str] = []
     p = out.append
+    p(f"# 需給診断データ(yfinance) 基準日 {n225.index[-1]:%Y-%m-%d}\n")
+    missing = [f"{k}({t})" for k, t in DIAG_NAMES.items() if k not in data]
+    if missing:
+        p(f"未取得: {', '.join(missing)}\n")
 
-    if "日経平均" not in px:
-        sys.exit("日経平均が取得できませんでした(ネットワークを確認)")
-    n225 = px["日経平均"].dropna()
-    base = n225.index[-1]
-    p(f"# 需給診断データ(yfinance) 基準日 {base:%Y-%m-%d}\n")
-
-    # --- B. テクニカル
+    # B. テクニカル
     for name in ("日経平均", "TOPIX(1306)"):
-        if name not in px:
-            p(f"## {name}: 未取得\n")
+        if name not in data:
+            p(f"## B. テクニカル: {name}: 未取得\n")
             continue
-        t = technicals(px[name], ohlc.get(name) if name == "日経平均" else None)
-        last = t.iloc[-1]
-        s = t["終値"]
-        hi_date = s[-250:].idxmax()
+        t = technicals(data[name], with_sar=(name == "日経平均"))
+        last, s = t.iloc[-1], t["終値"]
+        hi = s[-250:]
         p(f"## B. テクニカル: {name}")
-        p(f"- 終値 {last['終値']:,.2f}(前日比 {pct(s.iloc[-1], s.iloc[-2]):+.2f}%)"
-          f" / 1年高値 {s[-250:].max():,.2f}({hi_date:%Y-%m-%d})から {pct(s.iloc[-1], s[-250:].max()):+.2f}%")
+        p(f"- 終値 {last['終値']:,.2f}(前日比 {_pct(s.iloc[-1], s.iloc[-2]):+.2f}%)"
+          f" / 1年高値 {hi.max():,.2f}({hi.idxmax():%Y-%m-%d})から {_pct(s.iloc[-1], hi.max()):+.2f}%")
         p(f"- σ位置 {last['σ位置']:+.2f}σ(-2σ={last['-2σ']:,.2f}、MA25={last['MA25']:,.2f})")
-        p(f"- MA200 {last['MA200']:,.2f}(終値は {pct(last['終値'], last['MA200']):+.2f}%)")
+        p(f"- MA200 {last['MA200']:,.2f}(終値は {_pct(last['終値'], last['MA200']):+.2f}%)")
         for k in (25, 50, 75, 100):
             c = last_cross(t[f"MA{k}"], t["MA200"])
             if c:
@@ -229,23 +293,22 @@ def diag(args: argparse.Namespace) -> str:
         cols = ["終値", "MA25", "-2σ", "σ位置", "MA200", "MACD", "シグナル", "RSI14"]
         if "SAR上昇" in t:
             cols.append("SAR上昇")
-        p(fmt_table(t[cols].tail(args.rows).round(2)))
+        p(_md_table(t[cols].tail(ns.rows).round(2)))
         p("")
 
-    # --- A/D. NS倍率・NT倍率・ドル建て日経・VIX
+    # A/D. 比率・センチメント
     p("## A/D. 比率・センチメント")
     if "S&P500" in px:
-        ns = (px["日経平均"] / px["S&P500"]).dropna()
-        p(f"- NS倍率(日経平均÷S&P500) {ns.iloc[-1]:.3f}:"
-          f" 20営業日 {pct(ns.iloc[-1], ns.iloc[-21]):+.2f}% / 5営業日 {pct(ns.iloc[-1], ns.iloc[-6]):+.2f}%"
-          f" → {'上昇(スイッチON寄り)' if ns.iloc[-1] > ns.iloc[-21] else '低下(スイッチOFF寄り)'}")
+        r = (px["日経平均"] / px["S&P500"]).dropna()
+        p(f"- NS倍率(日経平均÷S&P500) {r.iloc[-1]:.3f}: 20営業日 {_pct(r.iloc[-1], r.iloc[-21]):+.2f}%"
+          f" / 5営業日 {_pct(r.iloc[-1], r.iloc[-6]):+.2f}%"
+          f" → {'上昇(スイッチON寄り)' if r.iloc[-1] > r.iloc[-21] else '低下(スイッチOFF寄り)'}")
     if "TOPIX(1306)" in px:
-        nt = (px["日経平均"] / px["TOPIX(1306)"]).dropna()
-        p(f"- NT倍率(日経平均÷1306.T、代替) 20営業日 {pct(nt.iloc[-1], nt.iloc[-21]):+.2f}%"
-          f" → {'日経平均優位' if nt.iloc[-1] > nt.iloc[-21] else 'TOPIX優位'}")
+        r = (px["日経平均"] / px["TOPIX(1306)"]).dropna()
+        p(f"- NT倍率(日経平均÷1306.T、代替) 20営業日 {_pct(r.iloc[-1], r.iloc[-21]):+.2f}%"
+          f" → {'日経平均優位' if r.iloc[-1] > r.iloc[-21] else 'TOPIX優位'}")
     if "ドル円" in px:
-        fx = px["ドル円"].reindex(n225.index).ffill()
-        usd = (n225 / fx).dropna()
+        usd = (n225 / px["ドル円"].reindex(n225.index).ffill()).dropna()
         r = rsi(usd)
         p(f"- ドル建て日経平均 {usd.iloc[-1]:,.2f}、RSI14 {r.iloc[-1]:.1f}"
           f"(直近120日の最低 {r[-120:].min():.1f} @ {r[-120:].idxmin():%Y-%m-%d})")
@@ -253,12 +316,11 @@ def diag(args: argparse.Namespace) -> str:
         v = px["VIX"].dropna()
         m, sg = macd(v)
         c = last_cross(m, sg)
-        p(f"- VIX {v.iloc[-1]:.2f}(前日比 {pct(v.iloc[-1], v.iloc[-2]):+.1f}%)、"
-          f"MACD-シグナル {m.iloc[-1] - sg.iloc[-1]:+.2f}"
+        p(f"- VIX {v.iloc[-1]:.2f}(前日比 {_pct(v.iloc[-1], v.iloc[-2]):+.1f}%)、MACD-シグナル {m.iloc[-1] - sg.iloc[-1]:+.2f}"
           + (f"、最終クロス {c[1]} {c[0]:%Y-%m-%d}(GC=株安サイン / DC=株高サイン、仮説)" if c else ""))
     p("")
 
-    # --- E. クロスマーケット
+    # E. クロスマーケット
     p("## E. クロスマーケット")
     rows = {}
     for name in px.columns:
@@ -266,38 +328,33 @@ def diag(args: argparse.Namespace) -> str:
         if len(s) < 200:
             continue
         rows[name] = {
-            "基準日": s.index[-1].strftime("%Y-%m-%d"),
-            "終値": s.iloc[-1],
-            "1日%": pct(s.iloc[-1], s.iloc[-2]),
-            "5日%": pct(s.iloc[-1], s.iloc[-6]),
-            "20日%": pct(s.iloc[-1], s.iloc[-21]),
-            "1年高値比%": pct(s.iloc[-1], s[-250:].max()),
+            "基準日": s.index[-1].strftime("%Y-%m-%d"), "終値": s.iloc[-1],
+            "1日%": _pct(s.iloc[-1], s.iloc[-2]), "5日%": _pct(s.iloc[-1], s.iloc[-6]),
+            "20日%": _pct(s.iloc[-1], s.iloc[-21]), "1年高値比%": _pct(s.iloc[-1], s[-250:].max()),
             "MA200上": "○" if s.iloc[-1] > s.rolling(200).mean().iloc[-1] else "×",
         }
     cm = pd.DataFrame(rows).T
     cm.index.name = "市場"
     for c in ("終値", "1日%", "5日%", "20日%", "1年高値比%"):
         cm[c] = cm[c].astype(float)
-    p(fmt_table(cm))
+    p(_md_table(cm))
     p("")
 
-    # --- C. 理論値
+    # C. 理論値
     close = n225.iloc[-1]
-    if any([args.per_w, args.per_i, args.bps_w, args.bps_i]):
+    if any([ns.per_w, ns.per_i, ns.bps_w, ns.bps_i]):
         p(f"## C. 理論値(終値 {close:,.2f} 基準)")
-        for label, per in (("加重", args.per_w), ("指数ベース", args.per_i)):
-            if not per:
-                continue
-            eps = close / per
-            p(f"- {label}: PER {per:.2f}倍 → EPS {eps:,.1f}円")
-            for k in (14, 15, 16, 21):
-                v = eps * k
-                p(f"  - PER{k}倍: {v:,.0f}円({v - close:+,.0f}円 / {pct(v, close):+.1f}%)")
-        for label, bps in (("加重", args.bps_w), ("指数ベース", args.bps_i)):
-            if not bps:
-                continue
-            v = 2 * bps
-            p(f"- {label} BPS {bps:,.0f}: 現在PBR {close / bps:.2f}倍、PBR2倍 {v:,.0f}円({pct(v, close):+.1f}%)")
+        for label, per in (("加重", ns.per_w), ("指数ベース", ns.per_i)):
+            if per:
+                eps = close / per
+                p(f"- {label}: PER {per:.2f}倍 → EPS {eps:,.1f}円")
+                for k in (14, 15, 16, 21):
+                    v = eps * k
+                    p(f"  - PER{k}倍: {v:,.0f}円({v - close:+,.0f}円 / {_pct(v, close):+.1f}%)")
+        for label, bps in (("加重", ns.bps_w), ("指数ベース", ns.bps_i)):
+            if bps:
+                p(f"- {label} BPS {bps:,.0f}: 現在PBR {close / bps:.2f}倍、"
+                  f"PBR2倍 {2 * bps:,.0f}円({_pct(2 * bps, close):+.1f}%)")
         p("")
     else:
         p("## C. 理論値: --per-w/--per-i/--bps-w/--bps-i 未指定のため省略\n")
@@ -306,67 +363,57 @@ def diag(args: argparse.Namespace) -> str:
     return "\n".join(out)
 
 
-def multi(args: argparse.Namespace) -> None:
-    px, _ = fetch_closes({t: t for t in args.tickers}, period=args.period)
-    if px.empty:
-        sys.exit("データが取得できませんでした")
-    px.index = px.index.strftime("%Y-%m-%d")
+def diag_main(argv: list[str]) -> None:
+    ap = argparse.ArgumentParser(prog="yf_prices.py diag", description="需給診断用のテクニカル・比率・理論値を計算する")
+    ap.add_argument("--period", default="2y", help="取得期間(MA200 の計算に1年以上必要)")
+    ap.add_argument("--end", help="この日までで計算(YYYY-MM-DD、指定日を含む)")
+    ap.add_argument("--rows", type=int, default=15, help="テクニカル表の表示行数")
+    ap.add_argument("--per-w", type=float, help="予想PER(加重)")
+    ap.add_argument("--per-i", type=float, help="予想PER(指数ベース)")
+    ap.add_argument("--bps-w", type=float, help="BPS(加重)")
+    ap.add_argument("--bps-i", type=float, help="BPS(指数ベース)")
+    ap.add_argument("--md", help="Markdown 保存先")
+    ns = ap.parse_args(argv)
+    text = diag(ns)
+    print(text)
+    if ns.md:
+        Path(ns.md).write_text(text + "\n", encoding="utf-8")
+        print(f"\n保存しました: {ns.md}")
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "diag":
+        diag_main(argv[1:])
+        return
+    ns = parse_args(argv)
+    data = fetch_many(ns.tickers, ns.start, ns.end, ns.period)
+    if not data:
+        sys.exit("データが取得できませんでした(ティッカー・期間・ネットワークを確認)")
+
     pd.set_option("display.width", 200)
-    print(px.round(2).to_string())
-    if args.csv:
-        px.to_csv(args.csv, encoding="utf-8-sig")
-        print(f"\n保存しました: {args.csv}")
+    single_full = len(ns.tickers) == 1 and not ns.outdir
+    if ns.outdir:
+        Path(ns.outdir).mkdir(parents=True, exist_ok=True)
 
+    for tk, df in data.items():
+        if single_full:
+            print(_for_display(df).to_string())
+        else:
+            last = df.index[-1].strftime("%Y-%m-%d")
+            print(f"== {tk}  {len(df)}行  最終日 {last}  終値 {df['Close'].iloc[-1]:,.2f}")
+            print(_for_display(df.tail(ns.tail)).to_string(), end="\n\n")
+        if ns.outdir:
+            path = Path(ns.outdir) / f"{safe_name(tk)}.csv"
+            df.round(4).to_csv(path, encoding="utf-8-sig")
+            print(f"保存しました: {path}")
+        elif ns.out:
+            df.round(2).to_csv(ns.out, encoding="utf-8-sig")
+            print(f"\n保存しました: {ns.out}")
 
-def single(argv: list[str]) -> None:
-    """従来の単一銘柄モード: TICKER [start] [end] [out.csv]"""
-    ticker = argv[0]
-    start = argv[1] if len(argv) > 1 else None
-    end = argv[2] if len(argv) > 2 else None
-    out = argv[3] if len(argv) > 3 else None
-    df = fetch(ticker, start=start, end=end)
-    if df.empty:
-        sys.exit(f"データが取得できませんでした: {ticker}(ティッカー・期間・ネットワークを確認)")
-    df.index = df.index.strftime("%Y-%m-%d")
-    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
-    df = df[cols].round(2)
-    pd.set_option("display.width", 200)
-    print(df.to_string())
-    if out:
-        df.to_csv(out, encoding="utf-8-sig")
-        print(f"\n保存しました: {out}")
-
-
-def main() -> None:
-    argv = sys.argv[1:]
-    if not argv or argv[0] in ("-h", "--help"):
-        sys.exit(__doc__)
-
-    if argv[0] == "diag":
-        ap = argparse.ArgumentParser(prog="yf_prices.py diag")
-        ap.add_argument("--period", default="2y", help="取得期間(MA200計算に1年以上必要)")
-        ap.add_argument("--end", help="この日までで計算(YYYY-MM-DD)")
-        ap.add_argument("--rows", type=int, default=15, help="テクニカル表の表示行数")
-        ap.add_argument("--per-w", type=float, help="予想PER(加重)")
-        ap.add_argument("--per-i", type=float, help="予想PER(指数ベース)")
-        ap.add_argument("--bps-w", type=float, help="BPS(加重)")
-        ap.add_argument("--bps-i", type=float, help="BPS(指数ベース)")
-        ap.add_argument("--md", help="Markdown 保存先")
-        args = ap.parse_args(argv[1:])
-        text = diag(args)
-        print(text)
-        if args.md:
-            with open(args.md, "w", encoding="utf-8") as f:
-                f.write(text + "\n")
-            print(f"\n保存しました: {args.md}")
-    elif argv[0] == "multi":
-        ap = argparse.ArgumentParser(prog="yf_prices.py multi")
-        ap.add_argument("tickers", nargs="+")
-        ap.add_argument("--period", default="1mo")
-        ap.add_argument("--csv")
-        multi(ap.parse_args(argv[1:]))
-    else:
-        single(argv)
+    missing = [t for t in ns.tickers if t not in data]
+    if missing:
+        print(f"\n取得できなかった銘柄: {', '.join(missing)}", file=sys.stderr)
 
 
 if __name__ == "__main__":
