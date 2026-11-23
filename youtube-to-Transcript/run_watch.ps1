@@ -38,7 +38,16 @@ try {
 
   # スクリプトは普段の作業ツリーのものを使い、保存先だけ専用ブランチ側にする
   Push-Location (Join-Path $Repo 'youtube-to-Transcript')
-  uv run watch_channels.py --channels $Channels --out (Join-Path $Wt 'transcripts')
+  # Python の出力を PowerShell のパイプに通してからログへ書く。
+  # 直接コンソールに書かせると Start-Transcript が一部しか拾わず、文字の間に空白が入って文字化けもする。
+  # そのため Python は UTF-8 で出力させ、PowerShell 側も UTF-8 で読む。stderr も一緒に記録する。
+  $env:PYTHONIOENCODING = 'utf-8'
+  $env:PYTHONUNBUFFERED = '1'
+  $prevEnc = [Console]::OutputEncoding
+  [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+  uv run watch_channels.py --channels $Channels --out (Join-Path $Wt 'transcripts') 2>&1 |
+    ForEach-Object { "$_" } | Out-Host
+  [Console]::OutputEncoding = $prevEnc
   Pop-Location
 
   git add transcripts
