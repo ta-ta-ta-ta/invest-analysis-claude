@@ -3,7 +3,10 @@
 使い方:
   python youtube-to-Transcript/watch_channels.py            # 新着を取得
   python youtube-to-Transcript/watch_channels.py --dry-run  # 取得せず対象だけ表示
-  python youtube-to-Transcript/watch_channels.py --since-days 7
+  python youtube-to-Transcript/watch_channels.py --since-hours 48
+  python youtube-to-Transcript/watch_channels.py --all       # 最新1本に絞らない
+
+対象はチャンネルごとに「公開から24時間以内の最新1本」だけ(--since-hours / --all で変更可)。
 
 チャンネルは youtube-to-Transcript/channels.json に書く:
   [{"name": "表示名", "handle": "@xxxx"}]   # channel_id (UC...) でも可
@@ -108,16 +111,23 @@ def write_markdown(path: Path, ch_name: str, v: dict, items: list) -> None:
 
 def main() -> int:
   ap = argparse.ArgumentParser()
-  ap.add_argument('--since-days', type=float, default=3,
-                  help='この日数より前に公開された動画は対象外 (既定: 3)')
+  ap.add_argument('--since-hours', type=float, default=24,
+                  help='この時間数より前に公開された動画は対象外 (既定: 24)')
+  ap.add_argument('--since-days', type=float, default=None,
+                  help='--since-hours の日数指定版(指定するとこちらを優先)')
+  ap.add_argument('--all', action='store_true',
+                  help='期間内の動画をすべて対象にする(既定はチャンネルごとに最新1本だけ)')
   ap.add_argument('--dry-run', action='store_true')
   ap.add_argument('--channels', type=Path, default=CHANNELS_FILE)
   ap.add_argument('--out', type=Path, default=OUT_ROOT,
                   help='保存先ルート (既定: <repo>/transcripts)')
   args = ap.parse_args()
+  # Windows コンソール(cp932)で表示できない絵文字などのタイトルで落ちないように
+  sys.stdout.reconfigure(errors='replace')
 
   channels = json.loads(args.channels.read_text(encoding='utf-8'))
-  cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=args.since_days)
+  hours = args.since_days * 24 if args.since_days is not None else args.since_hours
+  cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
   saved, pending, errors = [], [], []
 
   for ch in channels:
@@ -130,9 +140,12 @@ def main() -> int:
       errors.append(f'{name}: {e}')
       continue
 
+    videos = [v for v in videos if v['published'] >= cutoff]
+    if not args.all:
+      # 同じチャンネルは最新の1本だけ(字幕が未取得でも古い動画には戻らない)
+      videos = sorted(videos, key=lambda v: v['published'], reverse=True)[:1]
+
     for v in videos:
-      if v['published'] < cutoff:
-        continue
       if any(out_dir.glob(f"*_{v['id']}.md")):
         continue
       if args.dry_run:
