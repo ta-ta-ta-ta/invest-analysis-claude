@@ -17,7 +17,14 @@ try {
     else { git worktree add -b $Branch $Wt origin/main }
   }
   Set-Location $Wt
-  git pull --ff-only origin $Branch 2>$null
+  # 要約はクラウドだけが書くので、PC側は毎回 origin に合わせる。
+  # 前回 push できずに残ったコミット(未 push の文字起こし)があれば、その上に載せ直す。
+  git rebase origin/$Branch 2>&1 | Out-Host
+  if ($LASTEXITCODE -ne 0) {
+    git rebase --abort 2>&1 | Out-Host
+    Write-Output "エラー: origin/$Branch に合わせられませんでした。手作業で確認してください。"
+    exit 1
+  }
 
   # スクリプトとチャンネル一覧は普段の作業ツリーのものを使い、保存先だけ専用ブランチ側にする
   Push-Location (Join-Path $Repo 'youtube-to-Transcript')
@@ -28,9 +35,20 @@ try {
   git diff --cached --quiet
   if ($LASTEXITCODE -ne 0) {
     git commit -m "transcripts: $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
-    git push -u origin $Branch
   } else {
     Write-Output '新着なし'
+  }
+
+  # 未 push のコミットがあれば push(失敗したら pull --rebase して1回だけ再試行)
+  $ahead = git rev-list --count "origin/$Branch..HEAD"
+  if ([int]$ahead -gt 0) {
+    git push -u origin $Branch 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+      git pull --rebase origin $Branch 2>&1 | Out-Host
+      git push -u origin $Branch 2>&1 | Out-Host
+    }
+    if ($LASTEXITCODE -ne 0) { Write-Output 'エラー: push に失敗しました(次回の実行で再試行)'; exit 1 }
+    Write-Output "push 完了: $ahead コミット"
   }
 } finally {
   Stop-Transcript | Out-Null
