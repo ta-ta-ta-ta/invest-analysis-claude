@@ -1,4 +1,4 @@
-# 新着動画の文字起こしを取得して yt-transcripts ブランチへ push する(Windows 用)。
+﻿# 新着動画の文字起こしを取得して yt-transcripts ブランチへ push する(Windows 用)。
 # タスクスケジューラから 18:00 / 20:00 に呼ぶ。登録方法は README.md の「7. 新着の自動取得」。
 $ErrorActionPreference = 'Continue'  # git の stderr 出力で止まらないように
 $Branch = 'yt-transcripts'
