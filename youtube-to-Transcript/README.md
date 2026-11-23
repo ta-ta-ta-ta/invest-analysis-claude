@@ -168,3 +168,5 @@ PCが起動していて、git が GitHub に push できる状態(ログイン�
 ### チャンネルの追加・削除
 
 `channels.json` を編集する。`handle`(@xxxx)か `channel_id`(UC...)のどちらかがあればよい。
+
+`run_watch.ps1` は実行のたびに `origin/main` の `channels.json` を使うので、GitHub で main にマージすれば PC で pull しなくても次の回から反映される(取り出せないときだけ作業ツリーのものを使う)。`watch_channels.py` などのスクリプトは作業ツリーのものを使うので、スクリプトを変えたときは PC で pull する。
