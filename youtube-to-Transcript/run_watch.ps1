@@ -26,9 +26,19 @@ try {
     exit 1
   }
 
-  # スクリプトとチャンネル一覧は普段の作業ツリーのものを使い、保存先だけ専用ブランチ側にする
+  # チャンネル一覧は origin/main のものを使う(GitHub でマージすれば PC で pull しなくても反映される)。
+  # PowerShell 5.1 の > は UTF-16 で書くので、cmd のリダイレクトでバイトのまま書き出す。
+  # 取り出せなければ普段の作業ツリーの channels.json を使う。
+  $Channels = Join-Path $env:TEMP 'yt_watch_channels.json'
+  cmd /c "git -C `"$Repo`" show origin/main:youtube-to-Transcript/channels.json > `"$Channels`""
+  if ($LASTEXITCODE -ne 0 -or (Get-Item $Channels -ErrorAction SilentlyContinue).Length -eq 0) {
+    Write-Output '注意: origin/main の channels.json を取り出せないため、作業ツリーのものを使います'
+    $Channels = Join-Path $Repo 'youtube-to-Transcript\channels.json'
+  }
+
+  # スクリプトは普段の作業ツリーのものを使い、保存先だけ専用ブランチ側にする
   Push-Location (Join-Path $Repo 'youtube-to-Transcript')
-  uv run watch_channels.py --out (Join-Path $Wt 'transcripts')
+  uv run watch_channels.py --channels $Channels --out (Join-Path $Wt 'transcripts')
   Pop-Location
 
   git add transcripts
